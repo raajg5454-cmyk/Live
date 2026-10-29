@@ -1,0 +1,49 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>LiveHelp Admin</title>
+<style>body{font:16px system-ui;max-width:1100px;margin:auto;padding:16px}button,input{font:inherit;padding:8px;margin:4px 0}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.tile{border:1px solid #ccc;border-radius:10px;padding:8px}.tile h4{margin:0 0 6px;display:flex;justify-content:space-between;align-items:center}
+video{width:100%;background:#000;max-height:60vh}#ev div{font-size:14px;color:#555}</style>
+<div id=auth><h2>LiveHelp Admin</h2><input id=u placeholder="Mobile number" inputmode=numeric><br><input id=p type=password placeholder=Password><br><button id=login>Login</button></div>
+<div id=app hidden><h2>Live users: <span id=n>0</span></h2><div id=grid></div><h3>Activity</h3><div id=ev></div></div>
+<script>
+const $=id=>document.getElementById(id);let token,ws,ice,chain=Promise.resolve();const T=new Map();
+const tx=o=>ws.send(JSON.stringify(o));
+const ev=t=>{const d=document.createElement('div');d.textContent=new Date().toLocaleTimeString()+'  '+t;$('ev').prepend(d)};
+const count=()=>{$('n').textContent=[...T.values()].filter(t=>t.pc).length};
+$('login').onclick=async()=>{
+  const r=await fetch('/api/agent/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:$('u').value.trim(),password:$('p').value})});
+  const j=await r.json();if(!j.token)return alert(j.error||'Login failed');
+  token=j.token;ice=(await (await fetch('/api/ice',{headers:{Authorization:'Bearer '+token}})).json()).iceServers;
+  $('auth').hidden=true;$('app').hidden=false;connect();
+};
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.onopen=()=>tx({type:'auth',token});
+  ws.onmessage=e=>{const m=JSON.parse(e.data);chain=chain.then(()=>on(m)).catch(console.error)};
+  ws.onclose=()=>ev('Admin connection lost. Reload the page.');
+}
+function drop(id){const t=T.get(id);if(!t)return;if(t.pc)t.pc.close();if(t.el)t.el.remove();T.delete(id);count()}
+async function on(m){
+  if(m.type==='queue'){m.sessions.forEach(s=>{if(!T.has(s.id)){T.set(s.id,{phone:s.phone});tx({type:'accept',sessionId:s.id})}})}
+  else if(m.type==='connected'){
+    const id=m.sessionId,t=T.get(id)||{};t.phone=m.phone;
+    const el=document.createElement('div');el.className='tile';
+    const h=document.createElement('h4'),name=document.createElement('span'),b=document.createElement('button');
+    name.textContent=m.phone;b.textContent='End';b.onclick=()=>{tx({type:'end',sessionId:id});drop(id)};h.append(name,b);
+    const v=document.createElement('video');v.autoplay=true;v.muted=true;v.playsInline=true;v.controls=true;
+    el.append(h,v);$('grid').append(el);t.el=el;
+    const ms=new MediaStream();v.srcObject=ms;
+    const pc=new RTCPeerConnection({iceServers:ice});t.pc=pc;
+    pc.ontrack=e=>ms.addTrack(e.track);
+    pc.onicecandidate=e=>e.candidate&&tx({type:'signal',sessionId:id,data:{ice:e.candidate}});
+    T.set(id,t);count();ev(m.phone+' started sharing');
+  }
+  else if(m.type==='signal'){
+    const t=T.get(m.sessionId);if(!t||!t.pc)return;
+    if(m.data.sdp){await t.pc.setRemoteDescription(m.data.sdp);await t.pc.setLocalDescription(await t.pc.createAnswer());
+      tx({type:'signal',sessionId:m.sessionId,data:{sdp:t.pc.localDescription}})}
+    else if(m.data.ice){await t.pc.addIceCandidate(m.data.ice)}
+  }
+  else if(m.type==='ended'){const t=T.get(m.sessionId);if(t)ev((t.phone||'User')+' stopped');drop(m.sessionId)}
+}
+</script>
